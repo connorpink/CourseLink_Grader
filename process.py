@@ -1,0 +1,653 @@
+"""CourseLink CSV grading helper.
+
+This CLI has two workflows:
+1) Create a ready-to-import CSV by removing rows with empty grades.
+2) Run an interactive grading harness with fuzzy student lookup and autosave.
+"""
+
+from __future__ import annotations
+
+import csv
+import re
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
+from pathlib import Path
+from typing import Optional
+
+import typer
+
+try:
+    from prompt_toolkit import prompt
+    from prompt_toolkit.completion import Completion, Completer, FuzzyWordCompleter
+    from prompt_toolkit.key_binding import KeyBindings
+except ImportError as exc:  # pragma: no cover - runtime dependency message
+    raise SystemExit(
+        "Missing dependency: prompt_toolkit. Install with: pip install prompt_toolkit"
+    ) from exc
+
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+except ImportError as exc:  # pragma: no cover - runtime dependency message
+    raise SystemExit("Missing dependency: rich. Install with: pip install rich") from exc
+
+
+app = typer.Typer(
+    no_args_is_help=False,
+    add_completion=False,
+    help=(
+        "Prepare CourseLink CSV files for import and run an interactive grading harness."
+    ),
+)
+
+POINTS_GRADE_TOKEN = "Points Grade"
+ORG_DEFINED_ID_COLUMN = "OrgDefinedId"
+PROGRESS_SUFFIX = "__progress.csv"
+CRLF = "\r\n"
+QUIT_SENTINEL = "__QUIT__"
+BACK_SENTINEL = "__BACK__"
+console = Console()
+
+
+def clean_hash_prefix(value: str) -> str:
+    """Hide leading hash prefixes for display only."""
+    return value[1:] if value.startswith("#") else value
+
+
+def normalize_text(value: str) -> str:
+    """Normalize search text for matching."""
+    return " ".join(value.strip().lower().split())
+
+
+def ui_info(message: str) -> None:
+    """Print informational output with distinct styling."""
+    console.print(f"[bold cyan]INFO[/] {message}")
+
+
+def ui_warn(message: str) -> None:
+    """Print warning output with distinct styling."""
+    console.print(f"[bold yellow]WARN[/] {message}")
+
+
+def ui_error(message: str) -> None:
+    """Print error output with distinct styling."""
+    console.print(f"[bold red]ERROR[/] {message}")
+
+
+def ui_success(message: str) -> None:
+    """Print success output with distinct styling."""
+    console.print(f"[bold green]OK[/] {message}")
+
+
+@dataclass
+class CourseLinkSheet:
+    """Represents a CourseLink export CSV file in memory."""
+
+    source_path: Path
+    encoding: str
+    headers: list[str]
+    rows: list[list[str]]
+    grade_col_idx: int
+    org_id_col_idx: int
+    max_points: Optional[Decimal]
+
+
+@dataclass
+class StudentRecord:
+    """Represents a single student row and fields used for fuzzy search."""
+
+    row_index: int
+    org_defined_id: str
+    username: str
+    last_name: str
+    first_name: str
+
+    @property
+    def display_username(self) -> str:
+        """Username without hash prefix for display."""
+        return clean_hash_prefix(self.username)
+
+    @property
+    def display_org_defined_id(self) -> str:
+        """Org ID without hash prefix for display."""
+        return clean_hash_prefix(self.org_defined_id)
+
+    @property
+    def display_name(self) -> str:
+        """A consistent label shown in the student selector."""
+        return (
+            f"{self.last_name}, {self.first_name} | {self.display_username} | {self.display_org_defined_id}"
+        )
+
+    def search_terms(self) -> list[str]:
+        """Searchable fields, both raw and display-form values."""
+        first = self.first_name.lower()
+        last = self.last_name.lower()
+        username_raw = self.username.lower()
+        org_raw = self.org_defined_id.lower()
+        username_display = self.display_username.lower()
+        org_display = self.display_org_defined_id.lower()
+        return [
+            first,
+            last,
+            f"{first} {last}",
+            f"{last} {first}",
+            username_raw,
+            org_raw,
+            username_display,
+            org_display,
+            self.display_name.lower(),
+        ]
+
+
+def detect_encoding(path: Path) -> str:
+    """Detect whether the file uses UTF-8 BOM, otherwise plain UTF-8."""
+    raw = path.read_bytes()
+    return "utf-8-sig" if raw.startswith(b"\xef\xbb\xbf") else "utf-8"
+
+
+def parse_max_points(header: str) -> Optional[Decimal]:
+    """Extract max points from a CourseLink grade header."""
+    match = re.search(r"MaxPoints:(\d+(?:\.\d+)?)", header)
+    if not match:
+        return None
+    return Decimal(match.group(1))
+
+
+def ensure_row_width(row: list[str], width: int) -> list[str]:
+    """Pad or trim a row to match expected header width."""
+    if len(row) < width:
+        return row + [""] * (width - len(row))
+    if len(row) > width:
+        return row[:width]
+    return row
+
+
+def find_grade_column(headers: list[str]) -> int:
+    """Find the first column containing the standard 'Points Grade' token."""
+    for idx, header in enumerate(headers):
+        if POINTS_GRADE_TOKEN in header:
+            return idx
+    raise typer.BadParameter(
+        f"Could not find a grade column containing '{POINTS_GRADE_TOKEN}'."
+    )
+
+
+def read_sheet(path: Path) -> CourseLinkSheet:
+    """Read a CSV file and locate key CourseLink columns."""
+    if not path.exists():
+        raise typer.BadParameter(f"CSV file not found: {path}")
+
+    encoding = detect_encoding(path)
+    with path.open("r", newline="", encoding=encoding) as handle:
+        reader = csv.reader(handle)
+        try:
+            headers = next(reader)
+        except StopIteration as exc:
+            raise typer.BadParameter(f"CSV file is empty: {path}") from exc
+        rows = [ensure_row_width(row, len(headers)) for row in reader]
+
+    grade_col_idx = find_grade_column(headers)
+    try:
+        org_id_col_idx = headers.index(ORG_DEFINED_ID_COLUMN)
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"Missing required column '{ORG_DEFINED_ID_COLUMN}'."
+        ) from exc
+
+    max_points = parse_max_points(headers[grade_col_idx])
+
+    return CourseLinkSheet(
+        source_path=path,
+        encoding=encoding,
+        headers=headers,
+        rows=rows,
+        grade_col_idx=grade_col_idx,
+        org_id_col_idx=org_id_col_idx,
+        max_points=max_points,
+    )
+
+
+def write_sheet(path: Path, headers: list[str], rows: list[list[str]], encoding: str) -> None:
+    """Write CSV with CRLF endings for CourseLink compatibility."""
+    with path.open("w", newline="", encoding=encoding) as handle:
+        writer = csv.writer(handle, lineterminator=CRLF)
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+
+def list_csv_files(current_dir: Path) -> list[Path]:
+    """List CSV files in current directory."""
+    return sorted(
+        [path for path in current_dir.iterdir() if path.is_file() and path.suffix.lower() == ".csv"],
+        key=lambda item: item.name.lower(),
+    )
+
+
+def _build_keybindings() -> KeyBindings:
+    """Create keybindings used by interactive prompts."""
+    kb = KeyBindings()
+
+    @kb.add("c-q")
+    def _quit(event) -> None:  # type: ignore[no-untyped-def]
+        event.app.exit(result=QUIT_SENTINEL)
+
+    @kb.add("c-b")
+    def _back(event) -> None:  # type: ignore[no-untyped-def]
+        event.app.exit(result=BACK_SENTINEL)
+
+    return kb
+
+
+def make_fuzzy_completer(words: list[str]) -> FuzzyWordCompleter:
+    """Build a fuzzy completer that works across prompt_toolkit versions."""
+    try:
+        return FuzzyWordCompleter(words, sentence=True)
+    except TypeError:
+        return FuzzyWordCompleter(words)
+
+
+def rank_file_candidates(query: str, names: list[str]) -> list[tuple[int, str]]:
+    """Rank file-name candidates for fuzzy selection fallback."""
+    normalized_query = normalize_text(query)
+    ranked: list[tuple[int, str]] = []
+    for name in names:
+        lowered = name.lower()
+        score = 0
+        if lowered == normalized_query:
+            score += 300
+        if lowered.startswith(normalized_query):
+            score += 140
+        if normalized_query in lowered:
+            score += 80
+        score += int(SequenceMatcher(None, normalized_query, lowered).ratio() * 40)
+        ranked.append((score, name))
+    ranked.sort(key=lambda item: (-item[0], item[1].lower()))
+    return ranked
+
+
+def fuzzy_pick_file(current_dir: Path) -> Path:
+    """Pick a CSV file using fuzzy completion."""
+    csv_files = list_csv_files(current_dir)
+    if not csv_files:
+        raise typer.BadParameter(f"No CSV files found in: {current_dir}")
+    if len(csv_files) == 1:
+        return csv_files[0]
+
+    names = [path.name for path in csv_files]
+    completer = make_fuzzy_completer(names)
+    result = prompt(
+        "Select CSV (type to filter, arrows to choose, Enter to confirm): ",
+        completer=completer,
+        complete_while_typing=True,
+        key_bindings=_build_keybindings(),
+    ).strip()
+    if result == QUIT_SENTINEL:
+        raise typer.Exit(code=0)
+    if not result:
+        raise typer.BadParameter("No file selected.")
+    if result in names:
+        return current_dir / result
+
+    lowered = result.lower()
+    partials = [name for name in names if lowered in name.lower()]
+    if len(partials) == 1:
+        return current_dir / partials[0]
+    if partials:
+        return current_dir / rank_file_candidates(result, partials)[0][1]
+    ranked = rank_file_candidates(result, names)
+    if ranked and ranked[0][0] > 0:
+        return current_dir / ranked[0][1]
+    raise typer.BadParameter("Could not resolve CSV file selection.")
+
+
+def normalize_decimal_input(raw_grade: str) -> str:
+    """Validate and normalize decimal text so CSV stores plain numeric strings."""
+    try:
+        value = Decimal(raw_grade.strip())
+    except InvalidOperation as exc:
+        raise typer.BadParameter("Grade must be a valid decimal number.") from exc
+    if value < 0:
+        raise typer.BadParameter("Grade cannot be negative.")
+
+    normalized = format(value, "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized
+
+
+def build_students(sheet: CourseLinkSheet) -> list[StudentRecord]:
+    """Build searchable student records from sheet rows."""
+    headers = sheet.headers
+
+    def col_index(name: str) -> int:
+        try:
+            return headers.index(name)
+        except ValueError as exc:
+            raise typer.BadParameter(f"Missing required column '{name}'.") from exc
+
+    username_col = col_index("Username")
+    last_name_col = col_index("Last Name")
+    first_name_col = col_index("First Name")
+
+    students: list[StudentRecord] = []
+    for idx, row in enumerate(sheet.rows):
+        org_id = row[sheet.org_id_col_idx].strip()
+        if not org_id:
+            continue
+        students.append(
+            StudentRecord(
+                row_index=idx,
+                org_defined_id=org_id,
+                username=row[username_col].strip(),
+                last_name=row[last_name_col].strip(),
+                first_name=row[first_name_col].strip(),
+            )
+        )
+    return students
+
+
+def student_match_score(query: str, student: StudentRecord) -> int:
+    """Return weighted score; higher means better match."""
+    normalized_query = normalize_text(query)
+    if not normalized_query:
+        return 0
+
+    tokens = normalized_query.split()
+    first = student.first_name.lower()
+    last = student.last_name.lower()
+    full_forward = f"{first} {last}"
+    full_reverse = f"{last} {first}"
+    username_raw = student.username.lower()
+    org_raw = student.org_defined_id.lower()
+    username_display = student.display_username.lower()
+    org_display = student.display_org_defined_id.lower()
+    fields = [first, last, full_forward, full_reverse, username_raw, org_raw, username_display, org_display]
+
+    score = 0
+    if normalized_query == full_forward or normalized_query == full_reverse:
+        score += 300
+    if normalized_query == first or normalized_query == last:
+        score += 240
+    if normalized_query in (username_raw, username_display, org_raw, org_display):
+        score += 220
+
+    for token in tokens:
+        if token == first or token == last:
+            score += 120
+        if token == username_display or token == org_display:
+            score += 110
+        if token == username_raw or token == org_raw:
+            score += 110
+        if first.startswith(token) or last.startswith(token):
+            score += 80
+        if username_display.startswith(token) or org_display.startswith(token):
+            score += 70
+        for field in fields:
+            if token in field:
+                score += 25
+                break
+
+    for field in [full_forward, full_reverse, username_display, org_display]:
+        similarity = SequenceMatcher(None, normalized_query, field).ratio()
+        score += int(similarity * 30)
+
+    return score
+
+
+def rank_students(query: str, students: list[StudentRecord]) -> list[tuple[int, StudentRecord]]:
+    """Rank students by match score for a user query."""
+    normalized_query = normalize_text(query)
+    if not normalized_query:
+        ordered = sorted(students, key=lambda item: (item.last_name.lower(), item.first_name.lower()))
+        return [(0, student) for student in ordered]
+
+    ranked: list[tuple[int, StudentRecord]] = []
+    for student in students:
+        score = student_match_score(normalized_query, student)
+        if score > 0:
+            ranked.append((score, student))
+
+    ranked.sort(key=lambda item: (-item[0], item[1].last_name.lower(), item[1].first_name.lower()))
+    return ranked
+
+
+class StudentCompleter(Completer):
+    """Prompt-toolkit completer with weighted student ranking."""
+
+    def __init__(self, students: list[StudentRecord], sheet: CourseLinkSheet) -> None:
+        self.students = students
+        self.sheet = sheet
+
+    def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
+        query = document.text_before_cursor
+        ranked = rank_students(query, self.students)
+        if not ranked:
+            return
+
+        prefix_len = len(query)
+        for score, student in ranked[:25]:
+            grade = self.sheet.rows[student.row_index][self.sheet.grade_col_idx].strip() or "-"
+            label = f"{student.display_name} | grade:{grade}"
+            yield Completion(
+                text=student.org_defined_id,
+                start_position=-prefix_len,
+                display=label,
+                display_meta=f"score:{score}",
+            )
+
+
+def resolve_student_query(query: str, students: list[StudentRecord]) -> Optional[StudentRecord]:
+    """Resolve user input to a single student record robustly."""
+    normalized_query = normalize_text(query)
+    if not normalized_query:
+        return None
+
+    for student in students:
+        if normalized_query in {
+            normalize_text(student.org_defined_id),
+            normalize_text(student.display_org_defined_id),
+            normalize_text(student.username),
+            normalize_text(student.display_username),
+            normalize_text(student.display_name),
+            normalize_text(f"{student.first_name} {student.last_name}"),
+            normalize_text(f"{student.last_name} {student.first_name}"),
+        }:
+            return student
+
+    ranked = rank_students(normalized_query, students)
+    if not ranked:
+        return None
+    best_score, best_student = ranked[0]
+    return best_student if best_score >= 60 else None
+
+
+def prompt_student(students: list[StudentRecord], sheet: CourseLinkSheet) -> str:
+    """Prompt for a student selection using ranked fuzzy completion."""
+    result = prompt(
+        "Find student (Ctrl-B previous, Ctrl-Q quit): ",
+        completer=StudentCompleter(students, sheet),
+        complete_while_typing=True,
+        key_bindings=_build_keybindings(),
+    ).strip()
+
+    if result in (QUIT_SENTINEL, BACK_SENTINEL):
+        return result
+    return result
+
+
+def save_progress(sheet: CourseLinkSheet, progress_path: Path) -> None:
+    """Persist current grading progress so the harness can resume later."""
+    write_sheet(progress_path, sheet.headers, sheet.rows, sheet.encoding)
+
+
+@app.command("option1")
+def option1_create_import_ready(
+    csv_file: Optional[Path] = typer.Option(
+        None, "--csv", "-c", help="Source CourseLink CSV. If omitted, use fuzzy picker."
+    ),
+    out_file: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Output CSV path. Default: <source_stem>__ready_to_import.csv",
+    ),
+) -> None:
+    """Create a ready-to-import CSV by removing rows where grade is empty."""
+    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd())
+    sheet = read_sheet(source)
+
+    if out_file:
+        output_path = out_file
+    else:
+        output_path = source.with_name(f"{source.stem}__ready_to_import.csv")
+
+    filtered_rows = [
+        row for row in sheet.rows if row[sheet.grade_col_idx].strip() != ""
+    ]
+    removed_count = len(sheet.rows) - len(filtered_rows)
+
+    write_sheet(output_path, sheet.headers, filtered_rows, sheet.encoding)
+
+    summary = Table(show_header=False, box=box.SIMPLE_HEAVY)
+    summary.add_row("Source", source.name)
+    summary.add_row("Output", output_path.name)
+    summary.add_row("Removed empty-grade rows", str(removed_count))
+    summary.add_row("Rows kept", str(len(filtered_rows)))
+    console.print(Panel(summary, title="Option 1 Complete", border_style="green"))
+
+
+@app.command("option2")
+def option2_grading_harness(
+    csv_file: Optional[Path] = typer.Option(
+        None, "--csv", "-c", help="Source CSV to grade. If omitted, use fuzzy picker."
+    ),
+    progress_file: Optional[Path] = typer.Option(
+        None,
+        "--progress-out",
+        "-p",
+        help="Autosave path for in-progress CSV. Default: <source_stem>__progress.csv",
+    ),
+) -> None:
+    """Run interactive grading with fuzzy student search and autosave/resume."""
+    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd())
+    sheet = read_sheet(source)
+    students = build_students(sheet)
+    if not students:
+        raise typer.BadParameter("No student rows found in the selected CSV.")
+
+    if progress_file:
+        progress_path = progress_file
+    else:
+        progress_path = source.with_name(f"{source.stem}{PROGRESS_SUFFIX}")
+
+    last_graded_org_id: Optional[str] = None
+
+    details = Table(show_header=False, box=box.SIMPLE_HEAVY)
+    details.add_row("Loaded CSV", source.name)
+    details.add_row(
+        "Detected max points", str(sheet.max_points) if sheet.max_points is not None else "not found"
+    )
+    details.add_row("Autosave", progress_path.name)
+    details.add_row("Controls", "type to search + arrows + Enter, Ctrl-B previous, Ctrl-Q quit")
+    console.print(Panel(details, title="Option 2 Harness", border_style="cyan"))
+
+    by_org = {student.org_defined_id: student for student in students}
+    while True:
+        selection = prompt_student(students, sheet)
+        if selection == QUIT_SENTINEL:
+            ui_info("Stopping harness.")
+            break
+        if selection == BACK_SENTINEL:
+            if last_graded_org_id is None:
+                ui_warn("No previous graded student in this session.")
+                continue
+            student = by_org[last_graded_org_id]
+        else:
+            if not selection:
+                ui_warn("Please select or type a student.")
+                continue
+            student = by_org.get(selection)
+            if student is None:
+                resolved = resolve_student_query(selection, students)
+                if resolved is None:
+                    ui_error("No matching student found.")
+                    continue
+                student = resolved
+
+        student_row = sheet.rows[student.row_index]
+        current_grade = student_row[sheet.grade_col_idx].strip()
+        selected = Table(show_header=False, box=box.SIMPLE)
+        selected.add_row("Student", f"{student.last_name}, {student.first_name}")
+        selected.add_row("Username", student.display_username)
+        selected.add_row("OrgDefinedId", student.display_org_defined_id)
+        selected.add_row("Current grade", current_grade if current_grade else "<empty>")
+        console.print(Panel(selected, title="Selected Student", border_style="blue"))
+
+        while True:
+            raw_grade = prompt("Enter grade (Ctrl-B previous, Ctrl-Q quit): ", key_bindings=_build_keybindings()).strip()
+            if raw_grade == QUIT_SENTINEL:
+                ui_info("Stopping harness.")
+                return
+            if raw_grade == BACK_SENTINEL:
+                if last_graded_org_id is None:
+                    ui_warn("No previous graded student in this session.")
+                    continue
+                student = by_org[last_graded_org_id]
+                student_row = sheet.rows[student.row_index]
+                ui_info(
+                    "Switched to previous: "
+                    f"{student.last_name}, {student.first_name} "
+                    f"({student.display_username}, {student.display_org_defined_id})"
+                )
+                ui_info(f"Current grade: {student_row[sheet.grade_col_idx].strip() or '<empty>'}")
+                continue
+            if raw_grade == "":
+                ui_warn("Grade is required. Empty grade is not allowed.")
+                continue
+
+            try:
+                normalized = normalize_decimal_input(raw_grade)
+                numeric_value = Decimal(normalized)
+            except typer.BadParameter as exc:
+                ui_error(str(exc))
+                continue
+
+            if sheet.max_points is not None and numeric_value > sheet.max_points:
+                ui_error(f"Grade must be <= {sheet.max_points}. Received: {numeric_value}")
+                continue
+
+            student_row[sheet.grade_col_idx] = normalized
+            save_progress(sheet, progress_path)
+            last_graded_org_id = student.org_defined_id
+            ui_success(
+                f"Saved {normalized} for {student.last_name}, {student.first_name}. "
+                f"Progress written to {progress_path.name}"
+            )
+            break
+
+
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context) -> None:
+    """Show a simple option menu when run without a subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    menu = Table(show_header=False, box=box.SIMPLE_HEAVY)
+    menu.add_row("[bold cyan]1[/]", "Create a ready-to-import CSV (remove empty-grade rows)")
+    menu.add_row("[bold cyan]2[/]", "Run interactive grading harness (ranked fuzzy search + autosave)")
+    console.print(Panel(menu, title="CourseLink Helper", border_style="cyan"))
+    choice = typer.prompt("Enter 1 or 2", type=int)
+    if choice == 1:
+        ctx.invoke(option1_create_import_ready, csv_file=None, out_file=None)
+    elif choice == 2:
+        ctx.invoke(option2_grading_harness, csv_file=None, progress_file=None)
+    else:
+        raise typer.BadParameter("Invalid choice. Enter 1 or 2.")
+
+
+if __name__ == "__main__":
+    app()
