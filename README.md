@@ -7,6 +7,7 @@ It uses color-coded terminal output via `rich` to make statuses and workflow ste
 
 ### Option 1 (`option1`)
 - Loads a CourseLink export CSV.
+- If `fzf` is installed, prompts whether to use `fzf` for CSV selection.
 - Detects the assignment grade column by matching `"Points Grade"` in the header.
 - Creates a new CSV that is ready to import by removing rows where the grade cell is empty.
 - Keeps all columns and headers unchanged for remaining rows, including `End-of-Line Indicator`.
@@ -14,6 +15,9 @@ It uses color-coded terminal output via `rich` to make statuses and workflow ste
 
 ### Option 2 (`option2`)
 - Opens a CSV and runs an interactive grading harness.
+- If `fzf` is installed, prompts whether to use `fzf` for CSV and student selection.
+- In `fzf` mode, student matching uses case-insensitive fuzzy matching against a hidden search key
+  (name, username, IDs) while showing a clean display column for stable selection.
 - Uses ranked fuzzy search (live filter, arrow keys, Enter) to find students by:
   - `Last Name`
   - `First Name`
@@ -24,6 +28,7 @@ It uses color-coded terminal output via `rich` to make statuses and workflow ste
   it resolves to the best student match.
 - Displays `Username` and `OrgDefinedId` without the leading `#` for readability
   (the saved CSV still keeps original values).
+- If `fzf` selection is cancelled or fails, it falls back to the built-in picker.
 - Lets you enter decimal grades and validates:
   - grade is not empty
   - grade is numeric
@@ -66,5 +71,6 @@ python3 process.py option2 --csv "your_export.csv" --progress-out "my_progress.c
 ## Notes
 
 - CSV file selection supports fuzzy filtering when `--csv` is not provided.
+- `fzf` is optional and not a Python dependency; install separately if desired.
 - Progress files use `__progress.csv` suffix by default.
 - Output from option 1 uses `__ready_to_import.csv` suffix by default.

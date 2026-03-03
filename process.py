@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import csv
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
@@ -80,6 +82,62 @@ def ui_error(message: str) -> None:
 def ui_success(message: str) -> None:
     """Print success output with distinct styling."""
     console.print(f"[bold green]OK[/] {message}")
+
+
+def is_fzf_available() -> bool:
+    """Check whether fzf is available on PATH."""
+    return shutil.which("fzf") is not None
+
+
+def ask_use_fzf(purpose: str) -> bool:
+    """Ask user whether to use fzf when available."""
+    if not is_fzf_available():
+        ui_info("fzf not found on PATH. Using built-in picker.")
+        return False
+
+    return typer.confirm(f"fzf is available. Use fzf for {purpose}?", default=True)
+
+
+def run_fzf(
+    lines: list[str],
+    prompt_text: str,
+    header_text: str,
+    extra_args: Optional[list[str]] = None,
+) -> Optional[str]:
+    """Run fzf and return selected line, or None if cancelled/failed."""
+    if not lines:
+        return None
+
+    cmd = [
+        "fzf",
+        "--height=80%",
+        "--layout=reverse",
+        "--border",
+        "--prompt",
+        prompt_text,
+        "--header",
+        header_text,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input="\n".join(lines) + "\n",
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            check=False,
+        )
+    except OSError:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    selected = result.stdout.strip()
+    return selected if selected else None
 
 
 @dataclass
@@ -269,13 +327,38 @@ def rank_file_candidates(query: str, names: list[str]) -> list[tuple[int, str]]:
     return ranked
 
 
-def fuzzy_pick_file(current_dir: Path) -> Path:
-    """Pick a CSV file using fuzzy completion."""
+def fzf_pick_file(current_dir: Path, csv_files: list[Path]) -> Optional[Path]:
+    """Pick a CSV file using fzf."""
+    names = [path.name for path in csv_files]
+    selected = run_fzf(
+        names,
+        prompt_text="csv> ",
+        header_text="Type to filter, Enter to select, Esc/Ctrl-C to cancel",
+    )
+    if selected is None:
+        return None
+    if selected in names:
+        return current_dir / selected
+
+    ranked = rank_file_candidates(selected, names)
+    if ranked and ranked[0][0] > 0:
+        return current_dir / ranked[0][1]
+    return None
+
+
+def fuzzy_pick_file(current_dir: Path, use_fzf: bool = False) -> Path:
+    """Pick a CSV file using fzf or built-in fuzzy completion."""
     csv_files = list_csv_files(current_dir)
     if not csv_files:
         raise typer.BadParameter(f"No CSV files found in: {current_dir}")
     if len(csv_files) == 1:
         return csv_files[0]
+
+    if use_fzf:
+        selected = fzf_pick_file(current_dir, csv_files)
+        if selected is not None:
+            return selected
+        ui_warn("fzf selection cancelled or failed. Falling back to built-in picker.")
 
     names = [path.name for path in csv_files]
     completer = make_fuzzy_completer(names)
@@ -440,6 +523,56 @@ class StudentCompleter(Completer):
             )
 
 
+def fzf_pick_student(students: list[StudentRecord], sheet: CourseLinkSheet) -> Optional[str]:
+    """Pick a student using fzf and return OrgDefinedId."""
+    lines: list[str] = []
+    for student in students:
+        grade = sheet.rows[student.row_index][sheet.grade_col_idx].strip() or "-"
+        search_key = " ".join(
+            [
+                student.last_name.lower(),
+                student.first_name.lower(),
+                f"{student.first_name.lower()} {student.last_name.lower()}",
+                f"{student.last_name.lower()} {student.first_name.lower()}",
+                student.display_username.lower(),
+                student.username.lower(),
+                student.display_org_defined_id.lower(),
+                student.org_defined_id.lower(),
+            ]
+        )
+        display = (
+            f"{student.last_name}, {student.first_name} | "
+            f"{student.display_username} | {student.display_org_defined_id} | grade:{grade}"
+        )
+        line = (
+            f"{search_key}\t"
+            f"{display}\t"
+            f"{student.org_defined_id}"
+        )
+        lines.append(line)
+
+    selected = run_fzf(
+        lines,
+        prompt_text="student> ",
+        header_text="Type to filter, Enter to select, Esc/Ctrl-C to stop",
+        extra_args=[
+            "--delimiter",
+            "\t",
+            "--with-nth",
+            "2",
+            "--nth",
+            "1",
+            "--ignore-case",
+        ],
+    )
+    if selected is None:
+        return None
+
+    parts = selected.split("\t")
+    org_id = parts[2].strip() if len(parts) > 2 else ""
+    return org_id or None
+
+
 def resolve_student_query(query: str, students: list[StudentRecord]) -> Optional[StudentRecord]:
     """Resolve user input to a single student record robustly."""
     normalized_query = normalize_text(query)
@@ -465,8 +598,14 @@ def resolve_student_query(query: str, students: list[StudentRecord]) -> Optional
     return best_student if best_score >= 60 else None
 
 
-def prompt_student(students: list[StudentRecord], sheet: CourseLinkSheet) -> str:
-    """Prompt for a student selection using ranked fuzzy completion."""
+def prompt_student(students: list[StudentRecord], sheet: CourseLinkSheet, use_fzf: bool = False) -> str:
+    """Prompt for a student selection using fzf or ranked fuzzy completion."""
+    if use_fzf:
+        selected = fzf_pick_student(students, sheet)
+        if selected is not None:
+            return selected
+        ui_warn("fzf selection cancelled or failed. Falling back to built-in picker.")
+
     result = prompt(
         "Find student (Ctrl-B previous, Ctrl-Q quit): ",
         completer=StudentCompleter(students, sheet),
@@ -497,7 +636,8 @@ def option1_create_import_ready(
     ),
 ) -> None:
     """Create a ready-to-import CSV by removing rows where grade is empty."""
-    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd())
+    use_fzf = ask_use_fzf("CSV selection") if csv_file is None else False
+    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd(), use_fzf=use_fzf)
     sheet = read_sheet(source)
 
     if out_file:
@@ -533,7 +673,8 @@ def option2_grading_harness(
     ),
 ) -> None:
     """Run interactive grading with fuzzy student search and autosave/resume."""
-    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd())
+    use_fzf = ask_use_fzf("CSV and student selection")
+    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd(), use_fzf=use_fzf)
     sheet = read_sheet(source)
     students = build_students(sheet)
     if not students:
@@ -552,12 +693,17 @@ def option2_grading_harness(
         "Detected max points", str(sheet.max_points) if sheet.max_points is not None else "not found"
     )
     details.add_row("Autosave", progress_path.name)
-    details.add_row("Controls", "type to search + arrows + Enter, Ctrl-B previous, Ctrl-Q quit")
+    if use_fzf:
+        details.add_row("Picker mode", "fzf")
+        details.add_row("Controls", "fzf for student pick, Esc/Ctrl-C stops, Ctrl-B in grade prompt")
+    else:
+        details.add_row("Picker mode", "built-in fuzzy")
+        details.add_row("Controls", "type to search + arrows + Enter, Ctrl-B previous, Ctrl-Q quit")
     console.print(Panel(details, title="Option 2 Harness", border_style="cyan"))
 
     by_org = {student.org_defined_id: student for student in students}
     while True:
-        selection = prompt_student(students, sheet)
+        selection = prompt_student(students, sheet, use_fzf=use_fzf)
         if selection == QUIT_SENTINEL:
             ui_info("Stopping harness.")
             break
