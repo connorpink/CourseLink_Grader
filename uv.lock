@@ -33,9 +33,9 @@ wheels = [
 ]
 
 [[package]]
-name = "homework-6"
+name = "courselink-grader"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "prompt-toolkit" },
     { name = "rich" },

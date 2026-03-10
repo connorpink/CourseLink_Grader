@@ -14,6 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
@@ -21,8 +22,12 @@ import typer
 
 try:
     from prompt_toolkit import prompt
-    from prompt_toolkit.completion import Completion, Completer, FuzzyWordCompleter
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.completion import Completion, Completer
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit
+    from prompt_toolkit.widgets import Frame, Label, RadioList
 except ImportError as exc:  # pragma: no cover - runtime dependency message
     raise SystemExit(
         "Missing dependency: prompt_toolkit. Install with: pip install prompt_toolkit"
@@ -51,6 +56,7 @@ PROGRESS_SUFFIX = "__progress.csv"
 CRLF = "\r\n"
 QUIT_SENTINEL = "__QUIT__"
 BACK_SENTINEL = "__BACK__"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 console = Console()
 
 
@@ -201,6 +207,116 @@ class StudentRecord:
         ]
 
 
+@dataclass(frozen=True)
+class CsvBrowserEntry:
+    """An entry in the interactive CSV browser."""
+
+    path: Path
+    kind: str
+
+    @property
+    def label(self) -> str:
+        prefix = "dir" if self.kind == "dir" else "csv"
+        suffix = "/" if self.kind == "dir" else ""
+        return f"{prefix}: {self.path.name}{suffix}"
+
+
+class CsvBrowser:
+    """A simple tree-style CSV browser rooted at the project directory."""
+
+    def __init__(self, root_dir: Path) -> None:
+        self.root_dir = root_dir.resolve()
+        self.current_dir = self.root_dir
+        self.selection: Optional[Path] = None
+        self._empty_value = object()
+        self._selector = RadioList(values=[(self._empty_value, "Loading...")])
+        self._path_label = Label("")
+        self._help_label = Label(
+            "Up/Down move  Enter opens directory or selects CSV  Backspace goes up  Ctrl-Q or Esc cancels"
+        )
+        self._application = Application(
+            layout=Layout(
+                HSplit(
+                    [
+                        Frame(
+                            HSplit(
+                                [
+                                    self._path_label,
+                                    self._selector,
+                                    self._help_label,
+                                ]
+                            ),
+                            title="CSV Browser",
+                        )
+                    ]
+                ),
+                focused_element=self._selector,
+            ),
+            key_bindings=self._build_keybindings(),
+            full_screen=True,
+        )
+        self._refresh_entries()
+
+    def run(self) -> Optional[Path]:
+        """Launch the browser and return the selected CSV, if any."""
+        return self._application.run()
+
+    def _build_keybindings(self) -> KeyBindings:
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _enter(event) -> None:  # type: ignore[no-untyped-def]
+            current = self._selector.current_value
+            if current is self._empty_value:
+                return
+
+            entry = current
+            if entry.kind == "dir":
+                self.current_dir = entry.path
+                self._refresh_entries()
+                event.app.invalidate()
+                return
+
+            self.selection = entry.path
+            event.app.exit(result=entry.path)
+
+        @kb.add("backspace")
+        @kb.add("left")
+        def _go_up(event) -> None:  # type: ignore[no-untyped-def]
+            if self.current_dir == self.root_dir:
+                return
+
+            self.current_dir = self.current_dir.parent
+            self._refresh_entries()
+            event.app.invalidate()
+
+        @kb.add("c-q")
+        @kb.add("escape")
+        def _quit(event) -> None:  # type: ignore[no-untyped-def]
+            event.app.exit(result=None)
+
+        return kb
+
+    def _refresh_entries(self) -> None:
+        entries = list_browsable_entries(self.current_dir)
+        if entries:
+            values = [(entry, entry.label) for entry in entries]
+            self._selector.values = values
+            self._selector.current_value = values[0][0]
+            self._selector._selected_index = 0
+        else:
+            self._selector.values = [
+                (
+                    self._empty_value,
+                    "No CSV files or matching subdirectories here. Press Backspace to go up.",
+                )
+            ]
+            self._selector.current_value = self._empty_value
+            self._selector._selected_index = 0
+
+        self._path_label.text = f"Project root: {self.root_dir}\nCurrent: {format_browser_path(self.root_dir, self.current_dir)}"
+
+
 def detect_encoding(path: Path) -> str:
     """Detect whether the file uses UTF-8 BOM, otherwise plain UTF-8."""
     raw = path.read_bytes()
@@ -277,12 +393,75 @@ def write_sheet(path: Path, headers: list[str], rows: list[list[str]], encoding:
         writer.writerows(rows)
 
 
-def list_csv_files(current_dir: Path) -> list[Path]:
-    """List CSV files in current directory."""
-    return sorted(
-        [path for path in current_dir.iterdir() if path.is_file() and path.suffix.lower() == ".csv"],
-        key=lambda item: item.name.lower(),
-    )
+def iter_visible_children(directory: Path) -> list[Path]:
+    """Return non-hidden child paths sorted by name."""
+    try:
+        children = [child for child in directory.iterdir() if not child.name.startswith(".")]
+    except PermissionError:
+        return []
+    return sorted(children, key=lambda item: item.name.lower())
+
+
+@lru_cache(maxsize=None)
+def directory_contains_csv(directory: Path) -> bool:
+    """Return whether a directory contains a visible CSV anywhere below it."""
+    if not directory.is_dir():
+        return False
+
+    for child in iter_visible_children(directory):
+        if child.is_file() and child.suffix.lower() == ".csv":
+            return True
+        if child.is_dir() and directory_contains_csv(child):
+            return True
+    return False
+
+
+def list_browsable_entries(current_dir: Path) -> list[CsvBrowserEntry]:
+    """List subdirectories leading to CSVs and CSV files in the current directory."""
+    directories = [
+        CsvBrowserEntry(path=child, kind="dir")
+        for child in iter_visible_children(current_dir)
+        if child.is_dir() and directory_contains_csv(child)
+    ]
+    files = [
+        CsvBrowserEntry(path=child, kind="csv")
+        for child in iter_visible_children(current_dir)
+        if child.is_file() and child.suffix.lower() == ".csv"
+    ]
+    return directories + files
+
+
+def list_all_csv_files(root_dir: Path) -> list[Path]:
+    """Recursively list all visible CSV files under the project root."""
+    csv_files: list[Path] = []
+    if not root_dir.exists():
+        return csv_files
+
+    stack = [root_dir]
+    while stack:
+        current = stack.pop()
+        for child in reversed(iter_visible_children(current)):
+            if child.is_dir():
+                stack.append(child)
+            elif child.is_file() and child.suffix.lower() == ".csv":
+                csv_files.append(child)
+
+    return sorted(csv_files, key=lambda item: item.relative_to(root_dir).as_posix().lower())
+
+
+def format_browser_path(root_dir: Path, current_dir: Path) -> str:
+    """Format a directory path relative to the browser root."""
+    if current_dir == root_dir:
+        return "."
+    return f"./{current_dir.relative_to(root_dir).as_posix()}"
+
+
+def display_path(path: Path) -> str:
+    """Render paths relative to the project root when possible."""
+    absolute_path = path if path.is_absolute() else (Path.cwd() / path).resolve()
+    if absolute_path.is_relative_to(PROJECT_ROOT):
+        return str(absolute_path.relative_to(PROJECT_ROOT))
+    return str(path)
 
 
 def _build_keybindings() -> KeyBindings:
@@ -298,14 +477,6 @@ def _build_keybindings() -> KeyBindings:
         event.app.exit(result=BACK_SENTINEL)
 
     return kb
-
-
-def make_fuzzy_completer(words: list[str]) -> FuzzyWordCompleter:
-    """Build a fuzzy completer that works across prompt_toolkit versions."""
-    try:
-        return FuzzyWordCompleter(words, sentence=True)
-    except TypeError:
-        return FuzzyWordCompleter(words)
 
 
 def rank_file_candidates(query: str, names: list[str]) -> list[tuple[int, str]]:
@@ -327,64 +498,45 @@ def rank_file_candidates(query: str, names: list[str]) -> list[tuple[int, str]]:
     return ranked
 
 
-def fzf_pick_file(current_dir: Path, csv_files: list[Path]) -> Optional[Path]:
+def fzf_pick_file(root_dir: Path, csv_files: list[Path]) -> Optional[Path]:
     """Pick a CSV file using fzf."""
-    names = [path.name for path in csv_files]
+    relative_names = [path.relative_to(root_dir).as_posix() for path in csv_files]
     selected = run_fzf(
-        names,
+        relative_names,
         prompt_text="csv> ",
-        header_text="Type to filter, Enter to select, Esc/Ctrl-C to cancel",
+        header_text=(
+            "Browsing CSV files under project root. Type to filter nested paths, Enter to select, Esc/Ctrl-C to cancel"
+        ),
     )
     if selected is None:
         return None
-    if selected in names:
-        return current_dir / selected
+    if selected in relative_names:
+        return root_dir / selected
 
-    ranked = rank_file_candidates(selected, names)
+    ranked = rank_file_candidates(selected, relative_names)
     if ranked and ranked[0][0] > 0:
-        return current_dir / ranked[0][1]
+        return root_dir / ranked[0][1]
     return None
 
 
-def fuzzy_pick_file(current_dir: Path, use_fzf: bool = False) -> Path:
-    """Pick a CSV file using fzf or built-in fuzzy completion."""
-    csv_files = list_csv_files(current_dir)
+def pick_csv_file(root_dir: Path, use_fzf: bool = False) -> Path:
+    """Pick a CSV file using fzf or a built-in directory browser."""
+    csv_files = list_all_csv_files(root_dir)
     if not csv_files:
-        raise typer.BadParameter(f"No CSV files found in: {current_dir}")
+        raise typer.BadParameter(f"No CSV files found under project root: {root_dir}")
     if len(csv_files) == 1:
         return csv_files[0]
 
     if use_fzf:
-        selected = fzf_pick_file(current_dir, csv_files)
+        selected = fzf_pick_file(root_dir, csv_files)
         if selected is not None:
             return selected
         ui_warn("fzf selection cancelled or failed. Falling back to built-in picker.")
 
-    names = [path.name for path in csv_files]
-    completer = make_fuzzy_completer(names)
-    result = prompt(
-        "Select CSV (type to filter, arrows to choose, Enter to confirm): ",
-        completer=completer,
-        complete_while_typing=True,
-        key_bindings=_build_keybindings(),
-    ).strip()
-    if result == QUIT_SENTINEL:
+    selected = CsvBrowser(root_dir).run()
+    if selected is None:
         raise typer.Exit(code=0)
-    if not result:
-        raise typer.BadParameter("No file selected.")
-    if result in names:
-        return current_dir / result
-
-    lowered = result.lower()
-    partials = [name for name in names if lowered in name.lower()]
-    if len(partials) == 1:
-        return current_dir / partials[0]
-    if partials:
-        return current_dir / rank_file_candidates(result, partials)[0][1]
-    ranked = rank_file_candidates(result, names)
-    if ranked and ranked[0][0] > 0:
-        return current_dir / ranked[0][1]
-    raise typer.BadParameter("Could not resolve CSV file selection.")
+    return selected
 
 
 def normalize_decimal_input(raw_grade: str) -> str:
@@ -626,7 +778,7 @@ def save_progress(sheet: CourseLinkSheet, progress_path: Path) -> None:
 @app.command("option1")
 def option1_create_import_ready(
     csv_file: Optional[Path] = typer.Option(
-        None, "--csv", "-c", help="Source CourseLink CSV. If omitted, use fuzzy picker."
+        None, "--csv", "-c", help="Source CourseLink CSV. If omitted, browse from project root."
     ),
     out_file: Optional[Path] = typer.Option(
         None,
@@ -637,7 +789,7 @@ def option1_create_import_ready(
 ) -> None:
     """Create a ready-to-import CSV by removing rows where grade is empty."""
     use_fzf = ask_use_fzf("CSV selection") if csv_file is None else False
-    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd(), use_fzf=use_fzf)
+    source = csv_file if csv_file else pick_csv_file(PROJECT_ROOT, use_fzf=use_fzf)
     sheet = read_sheet(source)
 
     if out_file:
@@ -653,8 +805,8 @@ def option1_create_import_ready(
     write_sheet(output_path, sheet.headers, filtered_rows, sheet.encoding)
 
     summary = Table(show_header=False, box=box.SIMPLE_HEAVY)
-    summary.add_row("Source", source.name)
-    summary.add_row("Output", output_path.name)
+    summary.add_row("Source", display_path(source))
+    summary.add_row("Output", display_path(output_path))
     summary.add_row("Removed empty-grade rows", str(removed_count))
     summary.add_row("Rows kept", str(len(filtered_rows)))
     console.print(Panel(summary, title="Option 1 Complete", border_style="green"))
@@ -663,7 +815,7 @@ def option1_create_import_ready(
 @app.command("option2")
 def option2_grading_harness(
     csv_file: Optional[Path] = typer.Option(
-        None, "--csv", "-c", help="Source CSV to grade. If omitted, use fuzzy picker."
+        None, "--csv", "-c", help="Source CSV to grade. If omitted, browse from project root."
     ),
     progress_file: Optional[Path] = typer.Option(
         None,
@@ -674,7 +826,7 @@ def option2_grading_harness(
 ) -> None:
     """Run interactive grading with fuzzy student search and autosave/resume."""
     use_fzf = ask_use_fzf("CSV and student selection")
-    source = csv_file if csv_file else fuzzy_pick_file(Path.cwd(), use_fzf=use_fzf)
+    source = csv_file if csv_file else pick_csv_file(PROJECT_ROOT, use_fzf=use_fzf)
     sheet = read_sheet(source)
     students = build_students(sheet)
     if not students:
@@ -688,17 +840,17 @@ def option2_grading_harness(
     last_graded_org_id: Optional[str] = None
 
     details = Table(show_header=False, box=box.SIMPLE_HEAVY)
-    details.add_row("Loaded CSV", source.name)
+    details.add_row("Loaded CSV", display_path(source))
     details.add_row(
         "Detected max points", str(sheet.max_points) if sheet.max_points is not None else "not found"
     )
-    details.add_row("Autosave", progress_path.name)
+    details.add_row("Autosave", display_path(progress_path))
     if use_fzf:
         details.add_row("Picker mode", "fzf")
         details.add_row("Controls", "fzf for student pick, Esc/Ctrl-C stops, Ctrl-B in grade prompt")
     else:
-        details.add_row("Picker mode", "built-in fuzzy")
-        details.add_row("Controls", "type to search + arrows + Enter, Ctrl-B previous, Ctrl-Q quit")
+        details.add_row("Picker mode", "built-in browser + fuzzy student search")
+        details.add_row("Controls", "CSV browser: Enter dir/file, Backspace up, Ctrl-Q quit")
     console.print(Panel(details, title="Option 2 Harness", border_style="cyan"))
 
     by_org = {student.org_defined_id: student for student in students}
@@ -784,7 +936,7 @@ def main(ctx: typer.Context) -> None:
 
     menu = Table(show_header=False, box=box.SIMPLE_HEAVY)
     menu.add_row("[bold cyan]1[/]", "Create a ready-to-import CSV (remove empty-grade rows)")
-    menu.add_row("[bold cyan]2[/]", "Run interactive grading harness (ranked fuzzy search + autosave)")
+    menu.add_row("[bold cyan]2[/]", "Run interactive grading harness (student search + autosave)")
     console.print(Panel(menu, title="CourseLink Helper", border_style="cyan"))
     choice = typer.prompt("Enter 1 or 2", type=int)
     if choice == 1:
@@ -795,5 +947,10 @@ def main(ctx: typer.Context) -> None:
         raise typer.BadParameter("Invalid choice. Enter 1 or 2.")
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Console-script entrypoint."""
     app()
+
+
+if __name__ == "__main__":
+    run()

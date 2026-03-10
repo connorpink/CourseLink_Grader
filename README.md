@@ -1,6 +1,7 @@
 # CourseLink CSV Grading Helper
 
-`process.py` is a Typer CLI for CourseLink CSV exports.
+This project is a Typer CLI for CourseLink CSV exports.
+The source now lives under `src/`, and `uv` exposes it as the `CourseLink_Helper` command.
 It uses color-coded terminal output via `rich` to make statuses and workflow steps easier to follow.
 
 ## What it does
@@ -16,6 +17,10 @@ It uses color-coded terminal output via `rich` to make statuses and workflow ste
 ### Option 2 (`option2`)
 - Opens a CSV and runs an interactive grading harness.
 - If `fzf` is installed, prompts whether to use `fzf` for CSV and student selection.
+- Without `fzf`, the built-in CSV picker starts at the project root and behaves like a simple directory tree:
+  - arrow keys move the selection
+  - `Enter` opens a directory or selects a CSV
+  - `Backspace` moves to the parent directory
 - In `fzf` mode, student matching uses case-insensitive fuzzy matching against a hidden search key
   (name, username, IDs) while showing a clean display column for stable selection.
 - Uses ranked fuzzy search (live filter, arrow keys, Enter) to find students by:
@@ -44,33 +49,38 @@ It uses color-coded terminal output via `rich` to make statuses and workflow ste
 ## Install
 
 ```bash
-python3 -m pip install typer prompt_toolkit rich
+uv sync
 ```
 
 ## Usage
 
+Run commands from the project root.
+CSV files can live directly in the root or in nested folders such as `./grading/assignments/assignment1.csv`.
+
 Run menu mode (choose option 1 or 2):
 
 ```bash
-python3 process.py
+uv run CourseLink_Helper
 ```
 
 Direct command usage:
 
 ```bash
 # Option 1: ready-to-import CSV
-python3 process.py option1
-python3 process.py option1 --csv "your_export.csv" --out "ready_import.csv"
+uv run CourseLink_Helper option1
+uv run CourseLink_Helper option1 --csv "grading/assignments/assignment1.csv" --out "ready_import.csv"
 
 # Option 2: grading harness
-python3 process.py option2
-python3 process.py option2 --csv "your_export.csv"
-python3 process.py option2 --csv "your_export.csv" --progress-out "my_progress.csv"
+uv run CourseLink_Helper option2
+uv run CourseLink_Helper option2 --csv "grading/assignments/assignment1.csv"
+uv run CourseLink_Helper option2 --csv "grading/assignments/assignment1.csv" --progress-out "my_progress.csv"
 ```
 
 ## Notes
 
-- CSV file selection supports fuzzy filtering when `--csv` is not provided.
+- When `--csv` is not provided, CSV selection starts at the project root.
+- The built-in picker shows only directories that contain at least one CSV somewhere below them, plus CSV files in the current directory.
+- `fzf` mode searches recursively across CSV paths under the project root.
 - `fzf` is optional and not a Python dependency; install separately if desired.
 - Progress files use `__progress.csv` suffix by default.
 - Output from option 1 uses `__ready_to_import.csv` suffix by default.

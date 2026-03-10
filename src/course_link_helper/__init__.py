@@ -1,0 +1,2 @@
+"""CourseLink Helper package."""
+
