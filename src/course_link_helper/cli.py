@@ -56,7 +56,6 @@ PROGRESS_SUFFIX = "__progress.csv"
 CRLF = "\r\n"
 QUIT_SENTINEL = "__QUIT__"
 BACK_SENTINEL = "__BACK__"
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 console = Console()
 
 
@@ -232,7 +231,7 @@ class CsvBrowser:
         self._selector = RadioList(values=[(self._empty_value, "Loading...")])
         self._path_label = Label("")
         self._help_label = Label(
-            "Up/Down move  Enter opens directory or selects CSV  Backspace goes up  Ctrl-Q or Esc cancels"
+            "Up/Down move  Enter/Right opens directory or selects CSV  Left/Backspace goes up  Ctrl-Q or Esc cancels"
         )
         self._application = Application(
             layout=Layout(
@@ -264,7 +263,8 @@ class CsvBrowser:
     def _build_keybindings(self) -> KeyBindings:
         kb = KeyBindings()
 
-        @kb.add("enter")
+        @kb.add("enter", eager=True)
+        @kb.add("right", eager=True)
         def _enter(event) -> None:  # type: ignore[no-untyped-def]
             current = self._selector.current_value
             if current is self._empty_value:
@@ -280,8 +280,8 @@ class CsvBrowser:
             self.selection = entry.path
             event.app.exit(result=entry.path)
 
-        @kb.add("backspace")
-        @kb.add("left")
+        @kb.add("backspace", eager=True)
+        @kb.add("left", eager=True)
         def _go_up(event) -> None:  # type: ignore[no-untyped-def]
             if self.current_dir == self.root_dir:
                 return
@@ -456,11 +456,18 @@ def format_browser_path(root_dir: Path, current_dir: Path) -> str:
     return f"./{current_dir.relative_to(root_dir).as_posix()}"
 
 
-def display_path(path: Path) -> str:
-    """Render paths relative to the project root when possible."""
+def resolve_root(root_path: Optional[Path]) -> Path:
+    """Resolve the CSV browser root, defaulting to the caller's working directory."""
+    if root_path is None:
+        return Path.cwd().resolve()
+    return root_path.expanduser().resolve()
+
+
+def display_path(path: Path, root_dir: Path) -> str:
+    """Render paths relative to the active browser root when possible."""
     absolute_path = path if path.is_absolute() else (Path.cwd() / path).resolve()
-    if absolute_path.is_relative_to(PROJECT_ROOT):
-        return str(absolute_path.relative_to(PROJECT_ROOT))
+    if absolute_path.is_relative_to(root_dir):
+        return str(absolute_path.relative_to(root_dir))
     return str(path)
 
 
@@ -778,7 +785,7 @@ def save_progress(sheet: CourseLinkSheet, progress_path: Path) -> None:
 @app.command("option1")
 def option1_create_import_ready(
     csv_file: Optional[Path] = typer.Option(
-        None, "--csv", "-c", help="Source CourseLink CSV. If omitted, browse from project root."
+        None, "--csv", "-c", help="Source CourseLink CSV. If omitted, browse from the active root."
     ),
     out_file: Optional[Path] = typer.Option(
         None,
@@ -786,10 +793,16 @@ def option1_create_import_ready(
         "-o",
         help="Output CSV path. Default: <source_stem>__ready_to_import.csv",
     ),
+    root_dir: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        help="Directory to browse for CSV files. Default: current working directory.",
+    ),
 ) -> None:
     """Create a ready-to-import CSV by removing rows where grade is empty."""
+    active_root = resolve_root(root_dir)
     use_fzf = ask_use_fzf("CSV selection") if csv_file is None else False
-    source = csv_file if csv_file else pick_csv_file(PROJECT_ROOT, use_fzf=use_fzf)
+    source = csv_file if csv_file else pick_csv_file(active_root, use_fzf=use_fzf)
     sheet = read_sheet(source)
 
     if out_file:
@@ -805,8 +818,9 @@ def option1_create_import_ready(
     write_sheet(output_path, sheet.headers, filtered_rows, sheet.encoding)
 
     summary = Table(show_header=False, box=box.SIMPLE_HEAVY)
-    summary.add_row("Source", display_path(source))
-    summary.add_row("Output", display_path(output_path))
+    summary.add_row("Browse root", str(active_root))
+    summary.add_row("Source", display_path(source, active_root))
+    summary.add_row("Output", display_path(output_path, active_root))
     summary.add_row("Removed empty-grade rows", str(removed_count))
     summary.add_row("Rows kept", str(len(filtered_rows)))
     console.print(Panel(summary, title="Option 1 Complete", border_style="green"))
@@ -815,7 +829,7 @@ def option1_create_import_ready(
 @app.command("option2")
 def option2_grading_harness(
     csv_file: Optional[Path] = typer.Option(
-        None, "--csv", "-c", help="Source CSV to grade. If omitted, browse from project root."
+        None, "--csv", "-c", help="Source CSV to grade. If omitted, browse from the active root."
     ),
     progress_file: Optional[Path] = typer.Option(
         None,
@@ -823,10 +837,16 @@ def option2_grading_harness(
         "-p",
         help="Autosave path for in-progress CSV. Default: <source_stem>__progress.csv",
     ),
+    root_dir: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        help="Directory to browse for CSV files. Default: current working directory.",
+    ),
 ) -> None:
     """Run interactive grading with fuzzy student search and autosave/resume."""
+    active_root = resolve_root(root_dir)
     use_fzf = ask_use_fzf("CSV and student selection")
-    source = csv_file if csv_file else pick_csv_file(PROJECT_ROOT, use_fzf=use_fzf)
+    source = csv_file if csv_file else pick_csv_file(active_root, use_fzf=use_fzf)
     sheet = read_sheet(source)
     students = build_students(sheet)
     if not students:
@@ -840,11 +860,12 @@ def option2_grading_harness(
     last_graded_org_id: Optional[str] = None
 
     details = Table(show_header=False, box=box.SIMPLE_HEAVY)
-    details.add_row("Loaded CSV", display_path(source))
+    details.add_row("Browse root", str(active_root))
+    details.add_row("Loaded CSV", display_path(source, active_root))
     details.add_row(
         "Detected max points", str(sheet.max_points) if sheet.max_points is not None else "not found"
     )
-    details.add_row("Autosave", display_path(progress_path))
+    details.add_row("Autosave", display_path(progress_path, active_root))
     if use_fzf:
         details.add_row("Picker mode", "fzf")
         details.add_row("Controls", "fzf for student pick, Esc/Ctrl-C stops, Ctrl-B in grade prompt")
@@ -940,9 +961,9 @@ def main(ctx: typer.Context) -> None:
     console.print(Panel(menu, title="CourseLink Helper", border_style="cyan"))
     choice = typer.prompt("Enter 1 or 2", type=int)
     if choice == 1:
-        ctx.invoke(option1_create_import_ready, csv_file=None, out_file=None)
+        ctx.invoke(option1_create_import_ready, csv_file=None, out_file=None, root_dir=None)
     elif choice == 2:
-        ctx.invoke(option2_grading_harness, csv_file=None, progress_file=None)
+        ctx.invoke(option2_grading_harness, csv_file=None, progress_file=None, root_dir=None)
     else:
         raise typer.BadParameter("Invalid choice. Enter 1 or 2.")
 
