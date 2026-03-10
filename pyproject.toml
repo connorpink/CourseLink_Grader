@@ -4,10 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "courselink-grader"
-version = "0.1.0"
+version = "0.1.1"
 description = "CourseLink CSV grading helper"
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = ["courselink", "grading", "csv", "cli"]
+urls = { Homepage = "https://github.com/connorpink/CourseLink_Grader", Repository = "https://github.com/connorpink/CourseLink_Grader", Issues = "https://github.com/connorpink/CourseLink_Grader/issues" }
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Education",
+    "Topic :: Utilities",
+]
 dependencies = [
     "prompt-toolkit>=3.0.52",
     "rich>=14.1.0",
@@ -15,7 +27,10 @@ dependencies = [
 ]
 
 [project.scripts]
-CourseLink_Helper = "course_link_helper.cli:run"
+courselink-grader = "course_link_helper.cli:run"
+
+[tool.uv]
+trusted-publishing = "automatic"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

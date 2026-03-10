@@ -34,7 +34,7 @@ wheels = [
 
 [[package]]
 name = "courselink-grader"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "prompt-toolkit" },
