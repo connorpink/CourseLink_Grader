@@ -38,7 +38,12 @@ def main() -> None:
     if "Prepare CourseLink CSV files" not in result.stdout:
         raise SystemExit("CLI help output did not contain the expected help text.")
 
+    if "import-helper" not in result.stdout or "grading-harness" not in result.stdout:
+        raise SystemExit("CLI help output did not list the expected descriptive subcommands.")
+
+    if "option1" in result.stdout or "option2" in result.stdout:
+        raise SystemExit("Deprecated aliases should remain hidden from the main CLI help output.")
+
 
 if __name__ == "__main__":
     main()
-

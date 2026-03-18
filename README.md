@@ -36,7 +36,7 @@ uv sync
 Run `courselink-grader` from the directory that contains your grading files, or pass `--root` to browse somewhere else.
 CSV files can live directly in the current directory or in nested folders such as `./grading/assignments/assignment1.csv`.
 
-Run menu mode (choose option 1 or 2):
+Run menu mode (choose a workflow from the prompt):
 
 ```bash
 courselink-grader
@@ -45,21 +45,21 @@ courselink-grader
 Direct command usage:
 
 ```bash
-# Option 1: ready-to-import CSV
-courselink-grader option1
-courselink-grader option1 --csv "grading/assignments/assignment1.csv" --out "ready_import.csv"
-courselink-grader option1 --root "~/Courses/CS101"
+# Import helper: ready-to-import CSV
+courselink-grader import-helper
+courselink-grader import-helper --csv "grading/assignments/assignment1.csv" --out "ready_import.csv"
+courselink-grader import-helper --root "~/Courses/CS101"
 
-# Option 2: grading harness
-courselink-grader option2
-courselink-grader option2 --csv "grading/assignments/assignment1.csv"
-courselink-grader option2 --csv "grading/assignments/assignment1.csv" --progress-out "my_progress.csv"
-courselink-grader option2 --root "~/Courses/CS101"
+# Grading harness: interactive grading
+courselink-grader grading-harness
+courselink-grader grading-harness --csv "grading/assignments/assignment1.csv"
+courselink-grader grading-harness --csv "grading/assignments/assignment1.csv" --progress-out "my_progress.csv"
+courselink-grader grading-harness --root "~/Courses/CS101"
 ```
 
 ## What it does
 
-### Option 1 (`option1`)
+### Import helper (`import-helper`)
 
 - Loads a CourseLink export CSV.
 - If `fzf` is installed, prompts whether to use `fzf` for CSV selection.
@@ -68,7 +68,7 @@ courselink-grader option2 --root "~/Courses/CS101"
 - Keeps all columns and headers unchanged for remaining rows, including `End-of-Line Indicator`.
 - Keeps valid `0` grades.
 
-### Option 2 (`option2`)
+### Grading harness (`grading-harness`)
 
 - Opens a CSV and runs an interactive grading harness.
 - If `fzf` is installed, prompts whether to use `fzf` for CSV and student selection.
@@ -109,7 +109,7 @@ courselink-grader option2 --root "~/Courses/CS101"
 - `fzf` mode searches recursively across CSV paths under the active browse root.
 - `fzf` is optional and not a Python dependency; install separately if desired.
 - Progress files use `__progress.csv` suffix by default.
-- Output from option 1 uses `__ready_to_import.csv` suffix by default.
+- Output from `import-helper` uses `__ready_to_import.csv` suffix by default.
 
 ## Release Workflow
 
