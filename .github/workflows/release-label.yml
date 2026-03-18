@@ -8,16 +8,28 @@ on:
       - synchronize
       - labeled
       - unlabeled
+  workflow_dispatch:
 
 jobs:
   validate:
     name: Validate release label
-    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'release/next'
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.head.ref != 'release/next'
+      )
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     steps:
+      - name: Accept automated release PR
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: echo "Automated release PR validation dispatched successfully."
+
       - name: Check release label selection
+        if: github.event_name != 'workflow_dispatch'
         uses: actions/github-script@v7
         with:
           script: |

@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, for example v0.1.4"
+        required: true
+        type: string
 
 jobs:
   publish:
@@ -17,6 +23,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,10 +37,14 @@ jobs:
           enable-cache: true
 
       - name: Verify tag matches package version
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
-          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag_ref="${{ inputs.tag }}"
+          else
+            tag_ref="${GITHUB_REF_NAME}"
+          fi
+          tag_version="${tag_ref#v}"
           package_version="$(uv version --short)"
           if [ "$tag_version" != "$package_version" ]; then
             echo "Git tag version ($tag_version) does not match package version ($package_version)."
