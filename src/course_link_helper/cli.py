@@ -1,8 +1,8 @@
 """CourseLink CSV grading helper.
 
 This CLI has two workflows:
-1) Create a ready-to-import CSV by removing rows with empty grades.
-2) Run an interactive grading harness with fuzzy student lookup and autosave.
+1) `import-helper`: create a ready-to-import CSV by removing rows with empty grades.
+2) `grading-harness`: run interactive grading with fuzzy student lookup and autosave.
 """
 
 from __future__ import annotations
@@ -782,8 +782,8 @@ def save_progress(sheet: CourseLinkSheet, progress_path: Path) -> None:
     write_sheet(progress_path, sheet.headers, sheet.rows, sheet.encoding)
 
 
-@app.command("option1")
-def option1_create_import_ready(
+@app.command("import-helper")
+def import_helper(
     csv_file: Optional[Path] = typer.Option(
         None, "--csv", "-c", help="Source CourseLink CSV. If omitted, browse from the active root."
     ),
@@ -823,11 +823,11 @@ def option1_create_import_ready(
     summary.add_row("Output", display_path(output_path, active_root))
     summary.add_row("Removed empty-grade rows", str(removed_count))
     summary.add_row("Rows kept", str(len(filtered_rows)))
-    console.print(Panel(summary, title="Option 1 Complete", border_style="green"))
+    console.print(Panel(summary, title="Import Helper Complete", border_style="green"))
 
 
-@app.command("option2")
-def option2_grading_harness(
+@app.command("grading-harness")
+def grading_harness(
     csv_file: Optional[Path] = typer.Option(
         None, "--csv", "-c", help="Source CSV to grade. If omitted, browse from the active root."
     ),
@@ -872,7 +872,7 @@ def option2_grading_harness(
     else:
         details.add_row("Picker mode", "built-in browser + fuzzy student search")
         details.add_row("Controls", "CSV browser: Enter dir/file, Backspace up, Ctrl-Q quit")
-    console.print(Panel(details, title="Option 2 Harness", border_style="cyan"))
+    console.print(Panel(details, title="Grading Harness", border_style="cyan"))
 
     by_org = {student.org_defined_id: student for student in students}
     while True:
@@ -949,6 +949,57 @@ def option2_grading_harness(
             break
 
 
+@app.command("option1", hidden=True)
+def option1_alias(
+    ctx: typer.Context,
+    csv_file: Optional[Path] = typer.Option(
+        None, "--csv", "-c", help="Source CourseLink CSV. If omitted, browse from the active root."
+    ),
+    out_file: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Output CSV path. Default: <source_stem>__ready_to_import.csv",
+    ),
+    root_dir: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        help="Directory to browse for CSV files. Default: current working directory.",
+    ),
+) -> None:
+    """Backward-compatible alias for import-helper."""
+    ui_warn("`option1` is deprecated. Use `import-helper`.")
+    ctx.invoke(import_helper, csv_file=csv_file, out_file=out_file, root_dir=root_dir)
+
+
+@app.command("option2", hidden=True)
+def option2_alias(
+    ctx: typer.Context,
+    csv_file: Optional[Path] = typer.Option(
+        None, "--csv", "-c", help="Source CSV to grade. If omitted, browse from the active root."
+    ),
+    progress_file: Optional[Path] = typer.Option(
+        None,
+        "--progress-out",
+        "-p",
+        help="Autosave path for in-progress CSV. Default: <source_stem>__progress.csv",
+    ),
+    root_dir: Optional[Path] = typer.Option(
+        None,
+        "--root",
+        help="Directory to browse for CSV files. Default: current working directory.",
+    ),
+) -> None:
+    """Backward-compatible alias for grading-harness."""
+    ui_warn("`option2` is deprecated. Use `grading-harness`.")
+    ctx.invoke(
+        grading_harness,
+        csv_file=csv_file,
+        progress_file=progress_file,
+        root_dir=root_dir,
+    )
+
+
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     """Show a simple option menu when run without a subcommand."""
@@ -956,14 +1007,14 @@ def main(ctx: typer.Context) -> None:
         return
 
     menu = Table(show_header=False, box=box.SIMPLE_HEAVY)
-    menu.add_row("[bold cyan]1[/]", "Create a ready-to-import CSV (remove empty-grade rows)")
-    menu.add_row("[bold cyan]2[/]", "Run interactive grading harness (student search + autosave)")
+    menu.add_row("[bold cyan]1[/]", "import-helper: create a ready-to-import CSV")
+    menu.add_row("[bold cyan]2[/]", "grading-harness: interactive grading with autosave")
     console.print(Panel(menu, title="CourseLink Helper", border_style="cyan"))
-    choice = typer.prompt("Enter 1 or 2", type=int)
+    choice = typer.prompt("Enter 1 for import-helper or 2 for grading-harness", type=int)
     if choice == 1:
-        ctx.invoke(option1_create_import_ready, csv_file=None, out_file=None, root_dir=None)
+        ctx.invoke(import_helper, csv_file=None, out_file=None, root_dir=None)
     elif choice == 2:
-        ctx.invoke(option2_grading_harness, csv_file=None, progress_file=None, root_dir=None)
+        ctx.invoke(grading_harness, csv_file=None, progress_file=None, root_dir=None)
     else:
         raise typer.BadParameter("Invalid choice. Enter 1 or 2.")
 
