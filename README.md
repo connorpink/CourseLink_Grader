@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/courselink-grader)](https://pypi.org/project/courselink-grader/) [![Python versions](https://img.shields.io/pypi/pyversions/courselink-grader)](https://pypi.org/project/courselink-grader/)
 
-If your use can includes grading on CourseLink this tool may save you time entering grades into CourseLink. It supports entering a numeric grade for 1 deliverable at a time. It would mainly be useful for grading physical assignments.
+If your use-case includes grading on CourseLink this tool may save you time entering grades into CourseLink. It supports entering a numeric grade for 1 deliverable at a time. It would mainly be useful for grading physical assignments.
 
 First export a csv for the particular Assignment being graded, for the class section you intend to grade. Then run the program in the dir where the csv lives... Thats it! The program will act as a harness to speed up entering the grades, and it can format the csv for you so that it is ready to be imported back into CourseLink once your done entering grades.
 
@@ -110,6 +110,15 @@ courselink-grader grading-harness --root "~/Courses/CS101"
 - `fzf` is optional and not a Python dependency; install separately if desired.
 - Progress files use `__progress.csv` suffix by default.
 - Output from `import-helper` uses `__ready_to_import.csv` suffix by default.
+- When exporting the CSV from CourseLink, I use these options. Results may vary with other export settings:
+  - Key Field: `Both`
+  - Grade Values: `Points grade`
+    - no weighted grade or grade scheme
+  - User Details:
+    - Last Name
+    - First Name
+    - Email
+    - Section Membership
 
 ## Release Workflow
 
