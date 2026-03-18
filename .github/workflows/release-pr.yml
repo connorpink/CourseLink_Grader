@@ -162,6 +162,7 @@ jobs:
 
       - name: Create or update release PR
         if: steps.plan.outputs.should_release == 'true'
+        id: create_pr
         uses: peter-evans/create-pull-request@v6
         with:
           add-paths: |
@@ -175,3 +176,27 @@ jobs:
           body-path: /tmp/release-pr-body.md
           author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
           committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+
+      - name: Dispatch CI for release PR
+        if: steps.plan.outputs.should_release == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'main.yml',
+              ref: 'release/next',
+            });
+
+      - name: Dispatch release-label check for release PR
+        if: steps.plan.outputs.should_release == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'release-label.yml',
+              ref: 'release/next',
+            });

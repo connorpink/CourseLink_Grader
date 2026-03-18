@@ -33,12 +33,14 @@ jobs:
           enable-cache: true
 
       - name: Create and push release tag
+        id: tag_release
         env:
           UV_CACHE_DIR: /tmp/uv-cache
         shell: bash
         run: |
           version="$(uv version --short)"
           tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
           git fetch --tags origin
 
@@ -51,3 +53,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$tag" "${{ github.event.pull_request.merge_commit_sha }}" -m "Release $tag"
           git push origin "$tag"
+
+      - name: Dispatch publish workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'publish.yml',
+              ref: 'main',
+              inputs: {
+                tag: '${{ steps.tag_release.outputs.tag }}',
+              },
+            });
