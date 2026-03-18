@@ -1,0 +1,53 @@
+name: Tag Release
+
+on:
+  pull_request_target:
+    types:
+      - closed
+
+jobs:
+  tag:
+    name: Tag merged release PR
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'release/next'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout merged release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Create and push release tag
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        shell: bash
+        run: |
+          version="$(uv version --short)"
+          tag="v$version"
+
+          git fetch --tags origin
+
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" "${{ github.event.pull_request.merge_commit_sha }}" -m "Release $tag"
+          git push origin "$tag"
