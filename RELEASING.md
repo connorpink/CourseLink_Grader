@@ -55,26 +55,33 @@ Recommended GitHub settings:
 1. Protect `main`.
 2. Require pull requests before merging.
 3. Require the `CI` workflow to pass before merging.
-4. Prefer squash merges so release history stays clean.
+4. Require the `Release Label` workflow to pass before merging.
+5. Prefer squash merges so release history stays clean.
+
+## Release labels
+
+Normal pull requests that target `main` should carry exactly one of these labels:
+
+- `release:patch`
+- `release:minor`
+- `release:major`
+- `release:none`
+
+The `Release Label` workflow validates that exactly one label is present before the PR can merge.
+The automated release PR itself uses the `release/next` branch and is excluded from this check.
+Create these labels once in the GitHub repository settings so they are available on every PR.
 
 ## Release flow
 
-1. Merge the release-ready changes into `main`.
-2. Bump the version:
+1. Create a feature or fix branch and open a pull request as usual.
+2. Add exactly one release label to the PR:
+   - `release:patch` for bug fixes and small improvements
+   - `release:minor` for backward-compatible features
+   - `release:major` for breaking changes
+   - `release:none` when no package release should be created
+3. Merge the PR into `main` after CI passes.
+4. GitHub Actions will scan merged PRs since the last tag and create or update a `release/next` pull request with the correct version bump.
+5. Review and merge the generated release PR when you are ready to publish.
+6. GitHub Actions will tag the merged release commit and then publish to PyPI from that tag.
 
-```bash
-uv version --bump patch
-```
-
-3. Commit the version bump.
-4. Tag the exact matching version:
-
-```bash
-git tag -a "v$(uv version --short)" -m "Release v$(uv version --short)"
-git push origin main --tags
-```
-
-5. GitHub Actions will build, smoke test, and publish the package.
-
-The publish workflow checks that the Git tag matches the package version before uploading.
-
+The publish workflow only runs on pushed `v*` tags, and it checks that the Git tag matches the package version before uploading.

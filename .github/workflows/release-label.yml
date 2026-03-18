@@ -1,0 +1,43 @@
+name: Release Label
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+
+jobs:
+  validate:
+    name: Validate release label
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'release/next'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check release label selection
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const allowed = new Set([
+              'release:patch',
+              'release:minor',
+              'release:major',
+              'release:none',
+            ]);
+            const labels = (context.payload.pull_request.labels || []).map((label) => label.name);
+            const selected = labels.filter((name) => allowed.has(name));
+
+            core.info(`Selected release labels: ${selected.join(', ') || '(none)'}`);
+
+            if (selected.length !== 1) {
+              core.setFailed(
+                [
+                  'PRs targeting main must have exactly one release label.',
+                  'Allowed labels: release:patch, release:minor, release:major, release:none.',
+                  `Found: ${selected.length ? selected.join(', ') : '(none)'}`,
+                ].join(' ')
+              );
+            }

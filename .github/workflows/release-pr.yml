@@ -1,0 +1,177 @@
+name: Release PR
+
+on:
+  pull_request_target:
+    types:
+      - closed
+  workflow_dispatch:
+
+jobs:
+  prepare:
+    name: Create or update release PR
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'main' &&
+        github.event.pull_request.head.ref != 'release/next'
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-pr
+      cancel-in-progress: true
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Find latest release tag
+        id: latest_tag
+        shell: bash
+        run: |
+          tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -n "$tag" ]; then
+            echo "tag_date=$(git log -1 --format=%cI "$tag")" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag_date=1970-01-01T00:00:00Z" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine pending release bump
+        id: plan
+        uses: actions/github-script@v7
+        env:
+          TAG_DATE: ${{ steps.latest_tag.outputs.tag_date }}
+        with:
+          script: |
+            const bumpForLabel = {
+              'release:patch': 'patch',
+              'release:minor': 'minor',
+              'release:major': 'major',
+              'release:none': 'none',
+            };
+            const rank = { patch: 1, minor: 2, major: 3 };
+            const since = new Date(process.env.TAG_DATE);
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'closed',
+              base: 'main',
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 100,
+            });
+
+            const pending = prs.filter((pr) => {
+              if (!pr.merged_at) {
+                return false;
+              }
+              if (pr.head.ref === 'release/next') {
+                return false;
+              }
+              return new Date(pr.merged_at) > since;
+            });
+
+            let highest = null;
+            const summaryLines = [];
+            for (const pr of pending) {
+              const selected = (pr.labels || [])
+                .map((label) => bumpForLabel[label.name])
+                .filter(Boolean);
+              if (selected.length === 0 || selected.includes('none')) {
+                continue;
+              }
+
+              const prBump = selected.includes('major')
+                ? 'major'
+                : selected.includes('minor')
+                  ? 'minor'
+                  : 'patch';
+
+              if (!highest || rank[prBump] > rank[highest]) {
+                highest = prBump;
+              }
+
+              summaryLines.push(`- #${pr.number} ${pr.title} (${prBump})`);
+            }
+
+            core.setOutput('should_release', highest ? 'true' : 'false');
+            core.setOutput('bump', highest || '');
+            core.setOutput(
+              'summary',
+              summaryLines.length
+                ? summaryLines.join('\n')
+                : '- No merged PRs require a release right now.'
+            );
+
+      - name: Stop when no release is needed
+        if: steps.plan.outputs.should_release != 'true'
+        shell: bash
+        run: echo "No merged PRs with release:patch, release:minor, or release:major labels were found."
+
+      - name: Set up Python
+        if: steps.plan.outputs.should_release == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        if: steps.plan.outputs.should_release == 'true'
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Bump version for release PR
+        if: steps.plan.outputs.should_release == 'true'
+        id: bump
+        env:
+          UV_CACHE_DIR: /tmp/uv-cache
+        shell: bash
+        run: |
+          next_version="$(uv version --bump "${{ steps.plan.outputs.bump }}" --dry-run --short)"
+          uv version --bump "${{ steps.plan.outputs.bump }}"
+          echo "version=$next_version" >> "$GITHUB_OUTPUT"
+
+      - name: Write release PR body
+        if: steps.plan.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          since_ref="${{ steps.latest_tag.outputs.tag }}"
+          if [ -z "$since_ref" ]; then
+            since_ref="the beginning of the repository"
+          fi
+
+          cat > /tmp/release-pr-body.md <<EOF
+          ## Release Summary
+
+          This automated release PR was generated from merged PR labels since $since_ref.
+
+          Next version: \`${{ steps.bump.outputs.version }}\`
+
+          Included PRs:
+          ${{ steps.plan.outputs.summary }}
+          EOF
+
+      - name: Create or update release PR
+        if: steps.plan.outputs.should_release == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          add-paths: |
+            pyproject.toml
+            uv.lock
+          branch: release/next
+          base: main
+          delete-branch: true
+          commit-message: "chore: prepare release v${{ steps.bump.outputs.version }}"
+          title: "Release v${{ steps.bump.outputs.version }}"
+          body-path: /tmp/release-pr-body.md
+          author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+          committer: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
