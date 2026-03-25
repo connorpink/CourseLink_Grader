@@ -14,6 +14,7 @@ jobs:
       github.event.pull_request.head.ref == 'release/next'
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
     steps:
       - name: Checkout merged release commit
