@@ -48,6 +48,8 @@ Direct command usage:
 # Import helper: ready-to-import CSV
 courselink-grader import-helper
 courselink-grader import-helper --csv "grading/assignments/assignment1.csv" --out "ready_import.csv"
+courselink-grader import-helper --csv "grading/assignments/assignment1__progress.csv"
+courselink-grader import-helper --csv "grading/assignments/assignment1__progress.csv" --fresh-csv "grading/assignments/assignment1_fresh_export.csv"
 courselink-grader import-helper --root "~/Courses/CS101"
 
 # Grading harness: interactive grading
@@ -64,9 +66,12 @@ courselink-grader grading-harness --root "~/Courses/CS101"
 - Loads a CourseLink export CSV.
 - If `fzf` is installed, prompts whether to use `fzf` for CSV selection.
 - Detects the assignment grade column by matching `"Points Grade"` in the header.
-- Creates a new CSV that is ready to import by removing rows where the grade cell is empty.
+- For a plain CourseLink export, creates a new CSV that is ready to import by removing rows where the grade cell is empty.
+- For a `__progress.csv`, compares it against the original export by `OrgDefinedId` and only keeps rows whose normalized grade changed.
+- Optional `--fresh-csv` lets you merge those changed grades onto a fresh CourseLink export before writing the import-ready CSV.
 - Keeps all columns and headers unchanged for remaining rows, including `End-of-Line Indicator`.
 - Keeps valid `0` grades.
+- Refuses to merge when the original export and fresh export cannot be proven compatible.
 
 ### Grading harness (`grading-harness`)
 
@@ -97,10 +102,17 @@ courselink-grader grading-harness --root "~/Courses/CS101"
   - grade is `<= MaxPoints` parsed from header text like:
     - `Homework 6 Points Grade <Numeric MaxPoints:12 Weight:1>`
 - Autosaves after every entered grade into a progress CSV in the current directory.
+- Writes a sidecar metadata file next to the progress CSV so import prep can find the original export safely later.
 - Supports resume by reopening that progress CSV.
 - Keyboard controls:
-  - `Ctrl-Q`: quit
+  - `Ctrl-Q`: open the post-grading menu
   - `Ctrl-B`: jump to previously graded student
+  - `F2`: open the same post-grading menu without leaving the session
+- Post-grading menu options:
+  - resume grading
+  - prep import immediately from changed rows only
+  - prep import using a fresh CourseLink export
+  - exit
 
 ## Notes
 
@@ -109,6 +121,7 @@ courselink-grader grading-harness --root "~/Courses/CS101"
 - `fzf` mode searches recursively across CSV paths under the active browse root.
 - `fzf` is optional and not a Python dependency; install separately if desired.
 - Progress files use `__progress.csv` suffix by default.
+- Progress metadata uses `__progress.meta.json` suffix by default.
 - Output from `import-helper` uses `__ready_to_import.csv` suffix by default.
 - When exporting the CSV from CourseLink, I use these options. Results may vary with other export settings:
   - Key Field: `Both`
