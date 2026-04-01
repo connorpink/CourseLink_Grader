@@ -9,6 +9,8 @@ First export a csv for the particular Assignment being graded, for the class sec
 This project is a Typer CLI for CourseLink CSV exports. It can easily be installed as a PyPi package or built from source. The program will prefer FZF if installed, but has fallback functionality in pure-python as well.
 The source lives under `src/`, and the packaged CLI command is `courselink-grader`.
 
+> Note that this tool is in early development. Usage of this tool is at your own risk.
+
 ## Install
 
 ### Install from PyPI
@@ -132,10 +134,3 @@ courselink-grader grading-harness --root "~/Courses/CS101"
     - First Name
     - Email
     - Section Membership
-
-## Release Workflow
-
-- For local publishing, use a PyPI token with `UV_PUBLISH_TOKEN` instead of entering credentials interactively.
-- For CI/CD publishing, this repo includes GitHub Actions workflows for pull-request CI and tagged PyPI releases.
-- The recommended flow is feature branch -> pull request -> merge to `main` -> version bump -> `vX.Y.Z` tag -> publish workflow.
-- Detailed setup and release steps are in [`RELEASING.md`](RELEASING.md).
